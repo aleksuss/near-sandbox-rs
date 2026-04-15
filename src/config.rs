@@ -94,6 +94,7 @@ pub struct GenesisAccount {
     pub public_key: String,
     pub private_key: String,
     pub balance: NearToken,
+    pub locked: NearToken,
 }
 
 impl GenesisAccount {
@@ -103,6 +104,7 @@ impl GenesisAccount {
             public_key: DEFAULT_GENESIS_ACCOUNT_PUBLIC_KEY.to_string(),
             private_key: DEFAULT_GENESIS_ACCOUNT_PRIVATE_KEY.to_string(),
             balance: DEFAULT_GENESIS_ACCOUNT_BALANCE,
+            locked: NearToken::ZERO,
         }
     }
 }
@@ -165,8 +167,47 @@ impl Default for GenesisAccount {
             public_key: DEFAULT_GENESIS_ACCOUNT_PUBLIC_KEY.to_string(),
             private_key: DEFAULT_GENESIS_ACCOUNT_PRIVATE_KEY.to_string(),
             balance: DEFAULT_GENESIS_ACCOUNT_BALANCE,
+            locked: NearToken::ZERO,
         }
     }
+}
+
+/// Validator account configuration for genesis
+///
+/// Defines a validator account that will be included in the genesis configuration.
+/// Validators are responsible for producing and validating blocks in the NEAR network.
+///
+/// ## Example
+/// ```rust,no_run
+/// use near_sandbox::{ValidatorAccount, SandboxConfig};
+/// use near_token::NearToken;
+///
+/// let validator = ValidatorAccount {
+///     account_id: "validator.near".parse().unwrap(),
+///     public_key: "ed25519:5BGSaf6YjVm7565VzWQHNxoyEjwr3jUpRJSGjREvU9dB".to_string(),
+///     amount: NearToken::from_near(100),
+/// };
+///
+/// let config = SandboxConfig {
+///     validators: Some(vec![validator]),
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorAccount {
+    /// The account identifier for the validator
+    ///
+    /// Must be a valid NEAR account ID that will be used to identify this validator
+    /// in the network. This account will be created in genesis with validator privileges.
+    pub account_id: AccountId,
+    /// The validator's public key in base58-encoded ed25519 format
+    ///
+    /// Format: `ed25519:<base58_encoded_public_key>`
+    ///
+    /// This key will be used by the validator to sign blocks and participate in consensus.
+    pub public_key: String,
+    /// The amount of NEAR tokens staked by this validator
+    pub amount: NearToken,
 }
 
 /// Configuration for the sandbox
@@ -180,6 +221,8 @@ pub struct SandboxConfig {
     pub additional_config: Option<Value>,
     /// Additional accounts to add to the genesis
     pub additional_accounts: Vec<GenesisAccount>,
+    /// Validators to add to the genesis configuration
+    pub validators: Option<Vec<ValidatorAccount>>,
     /// Additional JSON configuration to merge with the genesis
     pub additional_genesis: Option<Value>,
     /// Port that RPC will be bound to. Will be picked randomly if not set.
@@ -307,13 +350,15 @@ fn overwrite_genesis(
     let records_array = records.as_array_mut().expect("expected to be array");
 
     for account in &accounts_to_add {
+        clean_duplicates(account, records_array);
+
         records_array.push(serde_json::json!(
             {
                 "Account": {
                     "account_id": account.account_id,
                     "account": {
                     "amount": account.balance,
-                    "locked": "0",
+                    "locked": account.locked,
                     "code_hash": "11111111111111111111111111111111",
                     "storage_usage": 182
                     }
@@ -333,6 +378,24 @@ fn overwrite_genesis(
                 }
             }
         ));
+    }
+
+    if let Some(new_validators) = &config.validators {
+        let validators = genesis_obj
+            .get_mut("validators")
+            .expect("expect exist validators");
+        let validators_array = validators.as_array_mut().expect("expected to be array");
+
+        validators_array.clear();
+
+        for validator in new_validators {
+            validators_array.push(serde_json::json!({
+                    "account_id": validator.account_id,
+                    "public_key": validator.public_key,
+                    "amount": validator.amount,
+                }
+            ));
+        }
     }
 
     if let Some(additional_genesis) = &config.additional_genesis {
@@ -389,4 +452,17 @@ pub fn set_sandbox_genesis_with_config(
     save_account_keys(&home_dir, &all_accounts)?;
 
     Ok(())
+}
+
+fn clean_duplicates(account: &GenesisAccount, records_array: &mut Vec<Value>) {
+    let matches = |record: &Value, key: &str| {
+        record
+            .as_object()
+            .and_then(|obj| obj.get(key))
+            .and_then(|val| val.get("account_id"))
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| id == account.account_id.as_str())
+    };
+
+    records_array.retain(|record| !matches(record, "Account") && !matches(record, "AccessKey"));
 }
